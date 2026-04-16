@@ -1,0 +1,22 @@
+# AutoPatch dependencies
+
+# Agent layer
+langchain-groq>=0.2.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+
+# HTTP client (calls CodeReview-Env)
+httpx>=0.27.0
+
+# Environment / config
+python-dotenv>=1.0.0
+
+# API server (Day 3)
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Memory agent — Redis optional, falls back to JSON automatically
+redis>=5.0.0
+
+# GitHub integration (Day 5 / v2)
+PyGithub>=2.3.0

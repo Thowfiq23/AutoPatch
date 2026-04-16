@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  min-height: 100vh;
+  background: #030712; /* gray-950 */
+}
+
+/* ── Fonts ─────────────────────────────────────────────────────────────────── */
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  color: #f1f5f9;
+}
+
+code, .font-mono, .font-mono * {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+}
+
+/* ── Glowing title ─────────────────────────────────────────────────────────── */
+.glow-text {
+  animation: glow-pulse 3s ease-in-out infinite alternate;
+  text-shadow: 0 0 8px rgba(74, 222, 128, 0.4);
+}
+
+@keyframes glow-pulse {
+  0%   { text-shadow: 0 0 8px rgba(74,222,128,0.3), 0 0 16px rgba(74,222,128,0.1); }
+  100% { text-shadow: 0 0 12px rgba(74,222,128,0.7), 0 0 28px rgba(74,222,128,0.25), 0 0 48px rgba(74,222,128,0.1); }
+}
+
+/* ── Scanline sweep ─────────────────────────────────────────────────────────── */
+.scanline-effect {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(74, 222, 128, 0.06) 20%,
+    rgba(74, 222, 128, 0.12) 50%,
+    rgba(74, 222, 128, 0.06) 80%,
+    transparent 100%
+  );
+  animation: scanline-move 12s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes scanline-move {
+  0%   { top: -2px; opacity: 0; }
+  5%   { opacity: 1; }
+  95%  { opacity: 1; }
+  100% { top: 100vh; opacity: 0; }
+}
+
+/* ── Shimmer on run button ──────────────────────────────────────────────────── */
+.shimmer-effect {
+  background: linear-gradient(
+    105deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.18) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-slide 2.8s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes shimmer-slide {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ── Card hover glow ────────────────────────────────────────────────────────── */
+.stat-card {
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+.stat-card:hover {
+  box-shadow: 0 0 0 1px rgba(74,222,128,0.15), 0 8px 32px -8px rgba(74,222,128,0.12);
+  border-color: rgba(74,222,128,0.2);
+}
+
+/* ── Custom scrollbar ───────────────────────────────────────────────────────── */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #1f2937;
+  border-radius: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #374151;
+}
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #1f2937 transparent;
+}
+
+/* ── Recharts overrides ─────────────────────────────────────────────────────── */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+.recharts-default-tooltip {
+  background: #111827 !important;
+  border: 1px solid #1f2937 !important;
+  border-radius: 12px !important;
+}
+
+/* ── Selection colour ───────────────────────────────────────────────────────── */
+::selection {
+  background: rgba(74, 222, 128, 0.25);
+  color: #f1f5f9;
+}
