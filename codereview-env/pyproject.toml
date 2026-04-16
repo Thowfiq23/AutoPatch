@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "codereview-env"
+version = "1.0.0"
+description = "OpenEnv environment for autonomous SWE bug-fixing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "openenv-core>=0.2.1",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "openai>=1.0.0",
+    "requests>=2.28.0",
+    "pytest>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.24.0",
+]
+
+# Top-level single-file modules (client, models, tasks, inference)
+[tool.setuptools]
+py-modules = ["client", "models", "tasks", "inference"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
+
+[tool.pytest.ini_options]
+# Restrict discovery to the project test suite only.
+# Without this, pytest walks into sandbox scratch dirs
+# (tmp_judge_workspaces/, tmp_test_run/, codereview_workspaces/, etc.)
+# and picks up agent-generated test files, poisoning the test run.
+testpaths = ["tests"]
+
+[project.scripts]
+server = "server.app:main"
