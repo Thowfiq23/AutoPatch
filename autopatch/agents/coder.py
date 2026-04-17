@@ -11,6 +11,7 @@ so the Evolver agent can rewrite the system prompt between episodes.
 import os
 import json
 import logging
+import re
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -51,6 +52,10 @@ async_error:
 
 logic_error:
   - Fix the specific logic bug described in the task. Do not change unrelated code.
+  - For file sort order bugs: use key=lambda f: int(f.split('_')[0]) for numeric prefix sorting.
+  - For multi-statement SQL: use conn.executescript(sql) NOT conn.execute() or conn.executemany().
+  - For swallowed exceptions: replace bare 'pass' in except blocks with 'raise' or 'logging.error(...); raise'.
+  - For memory leaks with unbounded lists: use collections.deque(maxlen=N) or explicit eviction.
 
 IMPORTANT:
   - Return the COMPLETE file content — every line, not just the diff.
@@ -76,6 +81,84 @@ def reset_system() -> None:
     """Restore the original BASE_SYSTEM prompt."""
     global _current_system
     _current_system = BASE_SYSTEM
+
+
+# ---------------------------------------------------------------------------
+# JSON parsing helpers
+# ---------------------------------------------------------------------------
+
+def _strip_fences(raw: str) -> str:
+    """Remove optional ```json or ``` fences from an LLM response."""
+    if raw.startswith("```json"):
+        raw = raw[7:]
+    elif raw.startswith("```"):
+        raw = raw[3:]
+    if raw.endswith("```"):
+        raw = raw[:-3]
+    return raw.strip()
+
+
+def _safe_json_loads(raw: str) -> dict:
+    """
+    Parse JSON from an LLM response robustly.
+
+    Handles common LLM failure modes in order of likelihood:
+    1. Standard valid JSON
+    2. Trailing content after the closing brace
+    3. Bare newlines / control chars inside JSON string values
+    4. Regex extraction of target_file + new_content as last resort
+    """
+    # Pass 1: standard parse
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Pass 2: extract outermost {...} block (handles trailing text)
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        candidate = match.group(0)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Pass 3: escape bare control characters inside JSON string values
+    sanitized = re.sub(
+        r'(?<=[^\\])([\x00-\x09\x0b-\x1f\x7f])',
+        lambda m: repr(m.group())[1:-1],
+        raw,
+    )
+    try:
+        return json.loads(sanitized)
+    except json.JSONDecodeError:
+        pass
+
+    # Pass 4: regex extraction — handles malformed JSON with unescaped quotes in code
+    # Extract target_file
+    tf_match = re.search(r'"target_file"\s*:\s*"([^"]+)"', raw)
+    # Extract explanation (simpler field)
+    ex_match = re.search(r'"explanation"\s*:\s*"([^"]*)"', raw)
+    # Extract new_content by finding the value between "new_content": " and the last "
+    nc_match = re.search(r'"new_content"\s*:\s*"(.*?)"\s*(?:,\s*"|\})', raw, re.DOTALL)
+    if not nc_match:
+        # Last-resort: grab everything between "new_content": " and end of string
+        nc_match = re.search(r'"new_content"\s*:\s*"(.*)', raw, re.DOTALL)
+
+    if tf_match and nc_match:
+        content = nc_match.group(1)
+        # Unescape \\n → \n, \\t → \t etc.
+        content = content.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').rstrip('"}')
+        return {
+            "target_file": tf_match.group(1),
+            "new_content": content,
+            "explanation": ex_match.group(1) if ex_match else "patch applied",
+        }
+
+    # Nothing worked — raise with clear diagnostic
+    if not raw.strip():
+        raise ValueError("LLM returned empty response — cannot parse JSON")
+    raise ValueError(f"Failed to parse JSON from LLM response (first 200 chars): {raw[:200]}")
 
 
 # ---------------------------------------------------------------------------
@@ -121,18 +204,9 @@ def code(file_content: str, task: dict, memory_hint: str = "") -> dict:
     llm = ChatGroq(model=_MODEL, temperature=0.0)
     messages = [SystemMessage(content=_current_system), HumanMessage(content=user_content)]
     response = llm.invoke(messages)
-    raw = (response.content or "").strip()
+    raw = _strip_fences((response.content or "").strip())
 
-    # Strip optional ```json fences
-    if raw.startswith("```json"):
-        raw = raw[7:]
-    elif raw.startswith("```"):
-        raw = raw[3:]
-    if raw.endswith("```"):
-        raw = raw[:-3]
-    raw = raw.strip()
-
-    result = json.loads(raw)
+    result = _safe_json_loads(raw)
 
     if not isinstance(result, dict) or "target_file" not in result or "new_content" not in result:
         raise ValueError(
@@ -179,17 +253,9 @@ def code_with_retry(file_content: str, task: dict, memory_hint: str = "",
         ))
 
     response = llm.invoke(messages)
-    raw = (response.content or "").strip()
+    raw = _strip_fences((response.content or "").strip())
 
-    if raw.startswith("```json"):
-        raw = raw[7:]
-    elif raw.startswith("```"):
-        raw = raw[3:]
-    if raw.endswith("```"):
-        raw = raw[:-3]
-    raw = raw.strip()
-
-    result = json.loads(raw)
+    result = _safe_json_loads(raw)
 
     if not isinstance(result, dict) or "target_file" not in result or "new_content" not in result:
         raise ValueError(

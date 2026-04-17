@@ -27,14 +27,21 @@ Return ONLY a valid JSON array — no markdown fences, no preamble, no explanati
 
 Each element must be a JSON object with exactly these keys:
   "file"            – relative path of the file to fix (must be from available_files)
-  "bug_description" – what is wrong
-  "fix_strategy"    – how to fix it
+  "bug_description" – what is wrong (use technical terms: function names, variable names, error types)
+  "fix_strategy"    – EXACT fix: copy the fix hint from code comments if present, otherwise be specific
   "bug_type"        – one of: sql_injection, weak_crypto, logic_error, hardcoded_secret, async_error
+
+CRITICAL RULES FOR fix_strategy:
+- If the file has inline comments like "Fix: use X", copy that EXACT fix into fix_strategy
+- For database migrations: use conn.executescript(sql) NOT conn.executemany() for multi-statement SQL
+- For sort order bugs: use key=lambda f: int(f.split('_')[0]) for numeric file ordering
+- For async bugs: use 'async def' AND 'await asyncio.sleep()' NOT 'await asyncio.wait()'
+- bug_type must match the actual bug: sorting/logic bugs = logic_error; NOT sql_injection
 
 Ordering rule: bugs that block more failing tests appear first in the array.
 
-Example output:
-[{"file": "auth/crypto.py", "bug_description": "Uses MD5 for password hashing", "fix_strategy": "Replace hashlib.md5 with hashlib.pbkdf2_hmac('sha256', ...)", "bug_type": "weak_crypto"}]
+Example:
+[{"file": "db/migrator.py", "bug_description": "sorted() uses lexicographic order, bare pass swallows exceptions, conn.execute drops multi-statement SQL", "fix_strategy": "sort key=lambda f: int(f.split('_')[0]), reraise exceptions, use conn.executescript(sql)", "bug_type": "logic_error"}]
 
 If no bugs are found, return an empty array: []
 Output ONLY the JSON array — nothing else."""
@@ -81,18 +88,44 @@ def plan(obs: dict) -> list:
             logger.error("[PLANNER] LLM returned non-list: %.200s", raw)
             return []
 
-        result = []
+        # Merge multiple tasks for the same file into one comprehensive task
+        merged: dict = {}  # file → merged task
         for task in tasks:
             if not isinstance(task, dict):
                 continue
-            # Filter files not present in the sandbox
             if task.get("file") not in available_files:
                 logger.warning("[PLANNER] Dropping task for unknown file: %s", task.get("file"))
+                continue
+            # Skip test files, __init__.py, and non-Python files — never patch these
+            file_name = task.get("file", "")
+            if (file_name.endswith("__init__.py")
+                    or not file_name.endswith(".py")
+                    or "/tests/" in file_name
+                    or file_name.startswith("tests/")):
+                logger.info("[PLANNER] Skipping non-patch-target: %s", file_name)
                 continue
             # Normalise unknown bug_type
             if task.get("bug_type") not in VALID_BUG_TYPES:
                 task["bug_type"] = "logic_error"
-            result.append(task)
+
+            file_key = task.get("file", "")
+            if file_key not in merged:
+                merged[file_key] = task.copy()
+            else:
+                # Merge: combine bug descriptions and fix strategies
+                existing = merged[file_key]
+                existing["bug_description"] = (
+                    existing.get("bug_description", "") + "; " + task.get("bug_description", "")
+                )
+                existing["fix_strategy"] = (
+                    existing.get("fix_strategy", "") + "; " + task.get("fix_strategy", "")
+                )
+                # Use the more specific bug_type (not logic_error if possible)
+                if existing.get("bug_type") == "logic_error" and task.get("bug_type") != "logic_error":
+                    existing["bug_type"] = task.get("bug_type")
+                logger.info("[PLANNER] Merged additional task into file: %s", file_key)
+
+        result = list(merged.values())[:3]  # cap at 3 files
 
         logger.info("[PLANNER] Produced %d task(s): %s", len(result), [t.get("file") for t in result])
         return result

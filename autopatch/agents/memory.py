@@ -80,17 +80,23 @@ def _save_json(data: dict) -> None:
 # Pattern storage
 # ---------------------------------------------------------------------------
 
-def store_pattern(bug_type: str, patch_content: str, reward: float) -> None:
+_MIN_PATTERN_REWARD = 0.5  # only store patterns that meaningfully improved the score
+
+
+def store_pattern(bug_type: str, patch_content: str, reward: float) -> bool:
     """
-    Store a patch as a reusable fix pattern.
+    Store a patch as a reusable fix pattern. Returns True if stored, False if skipped.
 
     Key format (Redis): pattern:{bug_type}:{md5_hash[:8]}
     Stored value: JSON with patch_content, reward, timestamp.
     Redis: LPUSH to a list per bug_type, capped at 50 entries via LTRIM.
     JSON: appended to patterns[bug_type] list.
 
-    Never raises.
+    Never raises. Silently ignores low-reward patches (reward < 0.5).
     """
+    if reward < _MIN_PATTERN_REWARD:
+        logger.debug("[MEMORY] Skipping low-reward pattern (%.3f < %.1f) for %s", reward, _MIN_PATTERN_REWARD, bug_type)
+        return False
     try:
         content_hash = hashlib.md5(patch_content.encode("utf-8")).hexdigest()[:8]
         redis_key = f"pattern:{bug_type}:{content_hash}"
@@ -114,9 +120,11 @@ def store_pattern(bug_type: str, patch_content: str, reward: float) -> None:
             patterns[bug_type] = bug_list[:_REDIS_LIST_CAP]
             _save_json(data)
             logger.debug("[MEMORY] Stored JSON pattern %s reward=%.3f", redis_key, reward)
+        return True
 
     except Exception as exc:
         logger.error("[MEMORY] store_pattern error: %s", exc)
+        return False
 
 
 def retrieve_pattern(bug_type: str) -> str:

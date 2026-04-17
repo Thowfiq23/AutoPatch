@@ -250,7 +250,8 @@ def _heuristic_confidence(original: str, new_content: str, bug_type: str) -> flo
     score = 0.7  # base pass score
 
     # Content was actually changed
-    if new_content.strip() != original.strip():
+    orig_safe = (original or "").strip()
+    if new_content.strip() != orig_safe:
         score += 0.1
 
     # Patch is non-trivially sized (not empty or just whitespace change)

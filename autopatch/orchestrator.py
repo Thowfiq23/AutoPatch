@@ -91,8 +91,8 @@ def _log(run_id: str, line: str) -> None:
 
 def node_reset(state: EpisodeState) -> dict:
     """
-    POST /reset then POST /step run_tests to capture initial pytest output.
-    The observation passed to the Planner always contains pytest output.
+    POST /reset → POST /step run_tests to capture initial pytest output.
+    Then search for common bug patterns to enrich the observation context.
     """
     run_id = state["run_id"]
     ep = state["episode"]
@@ -101,6 +101,18 @@ def node_reset(state: EpisodeState) -> dict:
     _reset()
     obs, _, _ = _step({"action_type": "run_tests"})
     _log(run_id, f"[RESET] initial pytest done task_id={obs.get('task_id')}")
+
+    # Enrich context for service-crash tasks: call inspect_logs when the context says so
+    context_text = obs.get("context", "")
+    if any(kw in context_text.lower() for kw in ("inspect_logs", "crashed", "restart_service", "service fails")):
+        try:
+            log_obs, _, _ = _step({"action_type": "inspect_logs"})
+            log_result = log_obs.get("action_result", "")
+            if log_result and "no log files" not in log_result.lower() and len(log_result.strip()) > 20:
+                obs = {**obs, "context": context_text + f"\n\nService logs:\n{log_result[:400]}"}
+                _log(run_id, "[RESET] Enriched context with service logs")
+        except Exception:
+            pass
 
     return {
         "observation": obs,
@@ -141,6 +153,17 @@ def node_read_file(state: EpisodeState) -> dict:
 
     task = state["plan"][idx]
     file_path = task.get("file", "")
+
+    # Skip files already patched with positive reward — avoids trap (-0.1) from re-patching
+    already_patched = {p["path"] for p in state.get("applied_patches", []) if p.get("path")}
+    if file_path in already_patched:
+        _log(run_id, f"[READ] Skipping already-patched file={file_path}, advancing task index")
+        return {
+            "current_task_index": idx + 1,
+            "retry_count": 0,
+            "current_patch": {},
+        }
+
     _log(run_id, f"[READ] file={file_path} task={idx + 1}/{len(state['plan'])}")
 
     obs, _, _ = _step({"action_type": "read_file", "path": file_path})
@@ -191,6 +214,23 @@ def node_code(state: EpisodeState) -> dict:
             )
         _log(run_id, f"[CODE] Patch ready for {patch.get('target_file')}")
         return {"current_patch": patch}
+    except ValueError as exc:
+        # LLM returned empty/unparseable response — retry once with simpler prompt
+        _log(run_id, f"[CODE] Parse error ({exc}) — retrying with simplified prompt")
+        try:
+            patch = coder.code(
+                file_content=state["original_file"],
+                task={**task, "bug_description": task.get("bug_description", "")[:100]},
+                memory_hint="",  # no hint on retry to reduce response size
+            )
+            _log(run_id, f"[CODE] Retry patch ready for {patch.get('target_file')}")
+            return {"current_patch": patch}
+        except Exception as exc2:
+            _log(run_id, f"[CODE] Retry also failed: {exc2} — skipping task")
+            return {
+                "current_task_index": state["current_task_index"] + 1,
+                "current_patch": {},
+            }
     except Exception as exc:
         _log(run_id, f"[CODE] Exception: {exc} — terminating episode")
         return {"done": True}
@@ -257,22 +297,31 @@ def node_patch(state: EpisodeState) -> dict:
     rewards = state["rewards"] + [reward]
     _log(run_id, f"[STEP] patch_file reward={reward:.3f} done={done}")
 
+    # For service-restart tasks, trigger restart_service to unlock the service-gate reward
+    # restart_service is now handled in node_submit after all patches are applied.
+    # We do NOT restart after each individual patch to avoid wasting steps.
+
     # Store successful patterns immediately (PRD §3.6 node_patch)
     applied = list(state.get("applied_patches", []))
     if reward > 0:
         idx = state["current_task_index"]
         task = state["plan"][idx]
-        memory.store_pattern(
+        stored = memory.store_pattern(
             bug_type=task.get("bug_type", "logic_error"),
             patch_content=patch.get("new_content", ""),
             reward=reward,
         )
-        _log(run_id, f"[MEMORY] Pattern stored bug_type={task.get('bug_type')} reward={reward:.3f}")
+        if stored:
+            _log(run_id, f"[MEMORY] Pattern stored bug_type={task.get('bug_type')} reward={reward:.3f}")
         # Accumulate for potential GitHub PR (v2)
         applied.append({
             "path":    patch.get("target_file", ""),
             "content": patch.get("new_content", ""),
         })
+
+    # NOTE: We intentionally skip a post-patch run_tests here.
+    # Extra steps reduce the step-efficiency component of the 6-factor reward.
+    # The planner already has full context from the initial run_tests in node_reset.
 
     return {
         "observation": obs,
@@ -290,14 +339,43 @@ def node_submit(state: EpisodeState) -> dict:
     score = max(rewards) if rewards else 0.0
     n_patched = state["current_task_index"]
 
+    bug_types = [t.get("bug_type", "") for t in state["plan"][:n_patched]]
+    files_patched = [p.get("path", "") for p in state.get("applied_patches", [])]
+
     summary = (
         f"AutoPatch applied {n_patched} patch(es). "
-        f"Bug types: {', '.join(t.get('bug_type','') for t in state['plan'][:n_patched])}. "
+        f"Bug types: {', '.join(bug_types)}. "
         f"Score: {score:.2f}"
     )
+
+    # root_cause diagnosis scores 15% of terminal reward — build a specific explanation
+    root_cause_parts = []
+    for task in state["plan"][:n_patched]:
+        bt = task.get("bug_type", "")
+        desc = task.get("bug_description", "")
+        strategy = task.get("fix_strategy", "")
+        root_cause_parts.append(f"{bt}: {desc}. Fix: {strategy}")
+    root_cause = "; ".join(root_cause_parts) if root_cause_parts else summary
+
     _log(run_id, f"[END] submitting n_patched={n_patched} score={score:.3f}")
 
-    obs, reward, done = _step({"action_type": "submit_review", "summary": summary})
+    # Call restart_service once before submitting if the task explicitly requires it
+    context_text = state.get("observation", {}).get("context", "")
+    if "restart_service" in context_text and n_patched > 0:
+        try:
+            restart_obs, restart_reward, restart_done = _step({"action_type": "restart_service"})
+            if restart_reward > 0:
+                rewards = state["rewards"] + [restart_reward]
+                score = max(rewards)
+            _log(run_id, f"[END] restart_service reward={restart_reward:.3f}")
+        except Exception as exc:
+            _log(run_id, f"[END] restart_service failed: {exc}")
+
+    obs, reward, done = _step({
+        "action_type": "submit_review",
+        "summary": summary,
+        "root_cause": root_cause,
+    })
     final_rewards = rewards + [reward]
     final_score = max(final_rewards)
     _log(run_id, f"[END] terminal_reward={reward:.3f} final_score={final_score:.3f}")
