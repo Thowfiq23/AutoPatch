@@ -56,6 +56,9 @@ logic_error:
   - For multi-statement SQL: use conn.executescript(sql) NOT conn.execute() or conn.executemany().
   - For swallowed exceptions: replace bare 'pass' in except blocks with 'raise' or 'logging.error(...); raise'.
   - For memory leaks with unbounded lists: use collections.deque(maxlen=N) or explicit eviction.
+  - For module-level accumulators (_processed_log, _log_list, etc.): change to deque(maxlen=N) OR remove the list AND update the count function to return 0 (never return len of a deleted variable).
+  - For service config values (CONNECT_TIMEOUT, CIRCUIT_BREAKER_THRESHOLD, etc.): read the exact correct value from the inline Fix comment (e.g. "# Fix: set to 3.0") and use THAT value — never guess.
+  - For retry off-by-one: change range(MAX_RETRIES + 1) to range(MAX_RETRIES) exactly as the comment instructs.
 
 IMPORTANT:
   - Return the COMPLETE file content — every line, not just the diff.

@@ -146,17 +146,14 @@ def maybe_evolve(run_id: str, episode_number: int) -> None:
 
         # --- Apply the new prompt ---
         coder.set_system(new_prompt)
-        memory.store_log(
-            run_id,
+        log_line = (
             f"[EVOLVER] episode={episode_number} prompt updated "
-            f"({len(new_prompt)} chars, from {len(current_prompt)} chars)",
+            f"({len(current_prompt)}→{len(new_prompt)} chars)"
         )
-        logger.info(
-            "[EVOLVER] episode=%d prompt updated (%d→%d chars)",
-            episode_number,
-            len(current_prompt),
-            len(new_prompt),
-        )
+        memory.store_log(run_id, log_line)
+        logger.info(log_line)
+        # Print to stdout so the diff is visible in run.py output (AC-03)
+        print(log_line, flush=True)
 
     except Exception as exc:
         logger.error("[EVOLVER] Unexpected error at episode %d: %s", episode_number, exc)

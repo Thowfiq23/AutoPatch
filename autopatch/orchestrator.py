@@ -319,6 +319,25 @@ def node_patch(state: EpisodeState) -> dict:
             "content": patch.get("new_content", ""),
         })
 
+    # For task_10: trigger a targeted restart_service after each successful patch
+    # on a services/{name}/ file. The env gives 0.04 per service that recovers,
+    # which is only unlocked with the service_name argument. Global restart in
+    # node_submit handles the final all-services check.
+    if reward > 0:
+        task_id_now = state["observation"].get("task_id", "")
+        if task_id_now == "task_10_pr":
+            for svc in ("db", "auth", "gateway"):
+                if f"services/{svc}/" in target:
+                    try:
+                        _, svc_reward, _ = _step(
+                            {"action_type": "restart_service", "service_name": svc}
+                        )
+                        rewards = rewards + [svc_reward]
+                        _log(run_id, f"[STEP] restart_service service_name={svc} reward={svc_reward:.3f}")
+                    except Exception as exc:
+                        _log(run_id, f"[STEP] restart_service {svc} failed: {exc}")
+                    break
+
     # NOTE: We intentionally skip a post-patch run_tests here.
     # Extra steps reduce the step-efficiency component of the 6-factor reward.
     # The planner already has full context from the initial run_tests in node_reset.

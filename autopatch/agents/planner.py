@@ -39,6 +39,7 @@ CRITICAL RULES FOR fix_strategy:
 - bug_type must match the actual bug: sorting/logic bugs = logic_error; NOT sql_injection
 
 Ordering rule: bugs that block more failing tests appear first in the array.
+Service dependency ordering: when the task describes a gateway → auth → db cascade, ALWAYS output tasks in dependency order: db first, then auth, then gateway. Never restart gateway before db/auth are fixed — it will worsen the cascade.
 
 Example:
 [{"file": "db/migrator.py", "bug_description": "sorted() uses lexicographic order, bare pass swallows exceptions, conn.execute drops multi-statement SQL", "fix_strategy": "sort key=lambda f: int(f.split('_')[0]), reraise exceptions, use conn.executescript(sql)", "bug_type": "logic_error"}]
