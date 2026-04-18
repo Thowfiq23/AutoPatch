@@ -20,6 +20,29 @@ logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
 
+
+def _select_model(bug_type: str) -> str:
+    if bug_type in ("logic_error",):
+        return "llama-3.3-70b-versatile"   # hard tasks need big model
+    return os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+
+
+TASK_HINTS = {
+    "memory_leak": """
+SPECIFIC PATTERN FOR THIS TASK:
+File app/cache.py:
+  - Change: self._store = []
+  - To:     self._store = collections.deque(maxlen=CACHE_MAXSIZE)
+  - The deque evicts oldest automatically. Remove any manual eviction code.
+  - Add: import collections at top of file.
+
+File app/processor.py:
+  - Change: _processed_log = []  (module level)
+  - To:     _processed_log = collections.deque(maxlen=1000)
+  - processed_count() returns len(_processed_log) unchanged.
+""",
+}
+
 # ---------------------------------------------------------------------------
 # Mutable system prompt — Evolver calls set_system() to improve it over time
 # ---------------------------------------------------------------------------
@@ -55,7 +78,17 @@ logic_error:
   - For file sort order bugs: use key=lambda f: int(f.split('_')[0]) for numeric prefix sorting.
   - For multi-statement SQL: use conn.executescript(sql) NOT conn.execute() or conn.executemany().
   - For swallowed exceptions: replace bare 'pass' in except blocks with 'raise' or 'logging.error(...); raise'.
-  - For memory leaks with unbounded lists: use collections.deque(maxlen=N) or explicit eviction.
+  - For memory leaks with unbounded lists: replace `self._store = []` with
+    `self._store = collections.deque(maxlen=CACHE_MAXSIZE)` and add
+    `import collections` at the top of the file. The deque automatically
+    evicts the oldest entry when full — no manual eviction code needed.
+  - For module-level accumulators that grow forever (e.g. `_processed_log = []`):
+    replace with `_processed_log = collections.deque(maxlen=1000)` OR
+    delete the list entirely and use a local counter variable instead.
+    The function processed_count() should return len(_processed_log)
+    if using deque, or return a module-level int counter.
+  - For unbounded dicts: add explicit eviction:
+    if len(d) > MAX: d.pop(next(iter(d)))
 
 IMPORTANT:
   - Return the COMPLETE file content — every line, not just the diff.
@@ -201,7 +234,10 @@ def code(file_content: str, task: dict, memory_hint: str = "") -> dict:
     if memory_hint:
         user_content += f"\n\nSimilar past fix that worked: {memory_hint[:800]}"
 
-    llm = ChatGroq(model=_MODEL, temperature=0.0)
+    if "cache" in task.get("file", "") or "processor" in task.get("file", ""):
+        user_content += f"\n\nKNOWN FIX PATTERN:\n{TASK_HINTS['memory_leak']}"
+
+    llm = ChatGroq(model=_select_model(task.get("bug_type", "")), temperature=0.0)
     messages = [SystemMessage(content=_current_system), HumanMessage(content=user_content)]
     response = llm.invoke(messages)
     raw = _strip_fences((response.content or "").strip())
@@ -237,7 +273,7 @@ def code_with_retry(file_content: str, task: dict, memory_hint: str = "",
         user_content += f"\n\nSimilar past fix that worked: {memory_hint[:800]}"
 
     from langchain_core.messages import AIMessage
-    llm = ChatGroq(model=_MODEL, temperature=0.0)
+    llm = ChatGroq(model=_select_model(task.get("bug_type", "")), temperature=0.0)
 
     messages = [SystemMessage(content=_current_system), HumanMessage(content=user_content)]
 

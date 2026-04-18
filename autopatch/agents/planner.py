@@ -21,6 +21,12 @@ VALID_BUG_TYPES = {"sql_injection", "weak_crypto", "logic_error", "hardcoded_sec
 
 _MODEL = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
 
+
+def _select_model(bug_type: str) -> str:
+    if bug_type in ("logic_error",):
+        return "llama-3.3-70b-versatile"   # hard tasks need big model
+    return os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+
 SYSTEM_PROMPT = """You are a code review planner. Analyze pytest failure output and PR context to identify bugs.
 
 Return ONLY a valid JSON array — no markdown fences, no preamble, no explanation.
@@ -68,7 +74,7 @@ def plan(obs: dict) -> list:
 
     raw = ""
     try:
-        llm = ChatGroq(model=_MODEL, temperature=0.0)
+        llm = ChatGroq(model=_select_model("logic_error"), temperature=0.0)
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_content)]
         response = llm.invoke(messages)
         raw = (response.content or "").strip()
