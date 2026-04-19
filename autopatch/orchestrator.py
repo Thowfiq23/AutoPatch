@@ -55,6 +55,7 @@ class EpisodeState(TypedDict):
     retry_count: int            # Critic rejections for the current task (resets per task)
     applied_patches: list       # [{path, content}] for every patch that earned reward > 0
     github_context: dict        # optional: {repo, issue_number, base_branch} for PR opener
+    file_cache: dict            # keyed by filepath, value is file content string
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +103,22 @@ def node_reset(state: EpisodeState) -> dict:
     obs, _, _ = _step({"action_type": "run_tests"})
     _log(run_id, f"[RESET] initial pytest done task_id={obs.get('task_id')}")
 
-    # Enrich context for service-crash tasks: call inspect_logs when the context says so
+    # Pre-cache candidate source files to avoid spending a step per read_file later.
+    file_cache: dict = {}
+    for fpath in obs.get("available_files", []):
+        if (fpath.endswith(".py")
+                and not fpath.startswith("tests/")
+                and not fpath.endswith("__init__.py")):
+            try:
+                fc_obs, _, _ = _step({"action_type": "read_file", "path": fpath})
+                file_cache[fpath] = fc_obs.get("action_result", "")
+            except Exception:
+                pass
+    _log(run_id, f"[RESET] pre-cached {len(file_cache)} files")
+
+    # Enrich context for migration/oom tasks: call inspect_logs when the context says so
     context_text = obs.get("context", "")
-    if any(kw in context_text.lower() for kw in ("inspect_logs", "crashed", "restart_service", "service fails")):
+    if any(kw in context_text.lower() for kw in ("inspect_logs", "migration", "oom_killed")):
         try:
             log_obs, _, _ = _step({"action_type": "inspect_logs"})
             log_result = log_obs.get("action_result", "")
@@ -124,6 +138,7 @@ def node_reset(state: EpisodeState) -> dict:
         "done": False,
         "retry_count": 0,
         "applied_patches": [],
+        "file_cache": file_cache,
     }
 
 
@@ -137,6 +152,19 @@ def node_plan(state: EpisodeState) -> dict:
             return {"plan": [], "done": True}
         files = [t.get("file") for t in fix_plan]
         _log(run_id, f"[PLAN] {len(fix_plan)} task(s): {files}")
+
+        # For topology/cascade tasks, pre-read the test file to extract expected values
+        if any("services/" in t.get("file", "") for t in fix_plan):
+            for test_file in state["observation"].get("available_files", []):
+                if test_file.startswith("tests/"):
+                    try:
+                        t_obs, _, _ = _step({"action_type": "read_file", "path": test_file})
+                        test_content = t_obs.get("action_result", "")[:1000]
+                        for task in fix_plan:
+                            task["fix_strategy"] = task.get("fix_strategy", "") + f"\n\nExpected values from tests:\n{test_content}"
+                    except Exception:
+                        pass
+
         return {"plan": fix_plan}
     except Exception as exc:
         _log(run_id, f"[PLAN] Exception: {exc}")
@@ -165,6 +193,16 @@ def node_read_file(state: EpisodeState) -> dict:
         }
 
     _log(run_id, f"[READ] file={file_path} task={idx + 1}/{len(state['plan'])}")
+
+    cached = state.get("file_cache", {}).get(file_path)
+    if cached:
+        _log(run_id, f"[READ] served from cache: {file_path}")
+        return {
+            "original_file": cached,
+            "observation": state["observation"],
+            "retry_count": 0,
+            "current_patch": {},
+        }
 
     obs, _, _ = _step({"action_type": "read_file", "path": file_path})
     return {
@@ -593,6 +631,7 @@ def run_episode(
         "retry_count": 0,
         "applied_patches": [],
         "github_context": github_context or {},
+        "file_cache": {},
     }
 
     final_state = _get_graph().invoke(initial_state)
