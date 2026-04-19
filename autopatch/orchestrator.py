@@ -103,18 +103,9 @@ def node_reset(state: EpisodeState) -> dict:
     obs, _, _ = _step({"action_type": "run_tests"})
     _log(run_id, f"[RESET] initial pytest done task_id={obs.get('task_id')}")
 
-    # Pre-cache candidate source files to avoid spending a step per read_file later.
+    # file_cache is populated lazily in node_read_file — pre-caching here was burning
+    # steps before patching, causing done=True on the first patch for task_10 (MAX_STEPS=10).
     file_cache: dict = {}
-    for fpath in obs.get("available_files", []):
-        if (fpath.endswith(".py")
-                and not fpath.startswith("tests/")
-                and not fpath.endswith("__init__.py")):
-            try:
-                fc_obs, _, _ = _step({"action_type": "read_file", "path": fpath})
-                file_cache[fpath] = fc_obs.get("action_result", "")
-            except Exception:
-                pass
-    _log(run_id, f"[RESET] pre-cached {len(file_cache)} files")
 
     # Enrich context for migration/oom tasks: call inspect_logs when the context says so
     context_text = obs.get("context", "")
@@ -152,18 +143,6 @@ def node_plan(state: EpisodeState) -> dict:
             return {"plan": [], "done": True}
         files = [t.get("file") for t in fix_plan]
         _log(run_id, f"[PLAN] {len(fix_plan)} task(s): {files}")
-
-        # For topology/cascade tasks, pre-read the test file to extract expected values
-        if any("services/" in t.get("file", "") for t in fix_plan):
-            for test_file in state["observation"].get("available_files", []):
-                if test_file.startswith("tests/"):
-                    try:
-                        t_obs, _, _ = _step({"action_type": "read_file", "path": test_file})
-                        test_content = t_obs.get("action_result", "")[:1000]
-                        for task in fix_plan:
-                            task["fix_strategy"] = task.get("fix_strategy", "") + f"\n\nExpected values from tests:\n{test_content}"
-                    except Exception:
-                        pass
 
         return {"plan": fix_plan}
     except Exception as exc:
@@ -356,25 +335,6 @@ def node_patch(state: EpisodeState) -> dict:
             "path":    patch.get("target_file", ""),
             "content": patch.get("new_content", ""),
         })
-
-    # For task_10: trigger a targeted restart_service after each successful patch
-    # on a services/{name}/ file. The env gives 0.04 per service that recovers,
-    # which is only unlocked with the service_name argument. Global restart in
-    # node_submit handles the final all-services check.
-    if reward > 0:
-        task_id_now = state["observation"].get("task_id", "")
-        if task_id_now == "task_10_pr":
-            for svc in ("db", "auth", "gateway"):
-                if f"services/{svc}/" in target:
-                    try:
-                        _, svc_reward, _ = _step(
-                            {"action_type": "restart_service", "service_name": svc}
-                        )
-                        rewards = rewards + [svc_reward]
-                        _log(run_id, f"[STEP] restart_service service_name={svc} reward={svc_reward:.3f}")
-                    except Exception as exc:
-                        _log(run_id, f"[STEP] restart_service {svc} failed: {exc}")
-                    break
 
     # NOTE: We intentionally skip a post-patch run_tests here.
     # Extra steps reduce the step-efficiency component of the 6-factor reward.

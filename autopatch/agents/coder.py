@@ -12,6 +12,7 @@ import os
 import json
 import logging
 import re
+import time
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -241,7 +242,27 @@ def code(file_content: str, task: dict, memory_hint: str = "") -> dict:
     temp = 0.2 if task.get("bug_type") == "logic_error" else 0.0
     llm = ChatGroq(model=_select_model(task.get("bug_type", "")), temperature=temp)
     messages = [SystemMessage(content=_current_system), HumanMessage(content=user_content)]
-    response = llm.invoke(messages)
+
+    for attempt in range(3):
+        try:
+            response = llm.invoke(messages)
+            break
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg and "try again in" in msg.lower():
+                import re as _re
+                m = _re.search(r"try again in (\d+)m(\d+)", msg)
+                wait = (int(m.group(1)) * 60 + int(m.group(2)) + 5) if m else 30
+                wait = min(wait, 60)
+                logger.warning("[CODER] Rate limit — sleeping %ds", wait)
+                time.sleep(wait)
+                if attempt == 2:
+                    raise
+            else:
+                raise
+    else:
+        raise ValueError("Rate limit retries exhausted")
+
     raw = _strip_fences((response.content or "").strip())
 
     result = _safe_json_loads(raw)
@@ -291,7 +312,26 @@ def code_with_retry(file_content: str, task: dict, memory_hint: str = "",
             )
         ))
 
-    response = llm.invoke(messages)
+    for attempt in range(3):
+        try:
+            response = llm.invoke(messages)
+            break
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg and "try again in" in msg.lower():
+                import re as _re
+                m = _re.search(r"try again in (\d+)m(\d+)", msg)
+                wait = (int(m.group(1)) * 60 + int(m.group(2)) + 5) if m else 30
+                wait = min(wait, 60)
+                logger.warning("[CODER] Rate limit retry — sleeping %ds", wait)
+                time.sleep(wait)
+                if attempt == 2:
+                    raise
+            else:
+                raise
+    else:
+        raise ValueError("Rate limit retries exhausted")
+
     raw = _strip_fences((response.content or "").strip())
 
     result = _safe_json_loads(raw)

@@ -148,7 +148,7 @@ def maybe_evolve(run_id: str, episode_number: int) -> None:
         coder.set_system(new_prompt)
         log_line = (
             f"[EVOLVER] episode={episode_number} prompt updated "
-            f"({len(current_prompt)}→{len(new_prompt)} chars)"
+            f"({len(current_prompt)}->{len(new_prompt)} chars)"
         )
         memory.store_log(run_id, log_line)
         logger.info(log_line)
