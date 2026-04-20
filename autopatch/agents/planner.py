@@ -11,6 +11,8 @@ order before any code is written.
 import os
 import json
 import logging
+import re
+import time
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -77,7 +79,26 @@ def plan(obs: dict) -> list:
     try:
         llm = ChatGroq(model=_select_model("logic_error"), temperature=0.0)
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_content)]
-        response = llm.invoke(messages)
+
+        for attempt in range(3):
+            try:
+                response = llm.invoke(messages)
+                break
+            except Exception as exc:
+                msg = str(exc)
+                if "429" in msg and "try again in" in msg.lower():
+                    m = re.search(r"try again in (\d+)m(\d+)", msg)
+                    wait = (int(m.group(1)) * 60 + int(m.group(2)) + 5) if m else 30
+                    wait = min(wait, 60)
+                    logger.warning("[PLANNER] Rate limit — sleeping %ds", wait)
+                    time.sleep(wait)
+                    if attempt == 2:
+                        raise
+                else:
+                    raise
+        else:
+            raise ValueError("Rate limit retries exhausted")
+
         raw = (response.content or "").strip()
 
         # Strip optional ```json fences
