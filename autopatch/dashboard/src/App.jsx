@@ -392,8 +392,171 @@ function EpisodeSlider({ value, onChange, disabled }) {
   )
 }
 
+// ─── Job status badge ────────────────────────────────────────────────────────
+function JobBadge({ status }) {
+  const map = {
+    running:   'bg-yellow-500/20 text-yellow-400 ring-yellow-700',
+    done:      'bg-green-500/20 text-green-400 ring-green-800',
+    error:     'bg-red-500/20 text-red-400 ring-red-800',
+    no_action: 'bg-slate-700/40 text-slate-400 ring-slate-700',
+    skipped:   'bg-slate-700/40 text-slate-400 ring-slate-700',
+  }
+  const cls = map[status] || map.skipped
+  return (
+    <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold ring-1 ${cls}`}>
+      {status?.toUpperCase()}
+    </span>
+  )
+}
+
+// ─── Live Repos tab ──────────────────────────────────────────────────────────
+function LiveReposTab() {
+  const [jobs, setJobs] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchJobs = async () => {
+      try {
+        const r = await fetch(`${API_URL}/jobs`)
+        const data = await r.json()
+        setJobs(data.jobs || [])
+      } catch (_) {}
+      setLoading(false)
+    }
+    fetchJobs()
+    const id = setInterval(fetchJobs, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Deduplicate repos
+  const repoMap = {}
+  for (const job of jobs) {
+    if (!repoMap[job.repo]) repoMap[job.repo] = { repo: job.repo, jobs: [] }
+    repoMap[job.repo].jobs.push(job)
+  }
+  const repos = Object.values(repoMap)
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Connected repos */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="bg-gray-900/60 border border-gray-800 rounded-2xl p-5 backdrop-blur-sm"
+      >
+        <h2 className="text-sm font-mono font-semibold text-slate-300 tracking-widest uppercase mb-4">
+          🔗 Connected Repos
+        </h2>
+        {loading ? (
+          <p className="text-slate-600 font-mono text-xs">Loading…</p>
+        ) : repos.length === 0 ? (
+          <div className="text-center py-8">
+            <div className="text-3xl mb-2 opacity-30">🔌</div>
+            <p className="text-slate-600 font-mono text-sm">No webhook jobs yet.</p>
+            <p className="text-slate-700 font-mono text-xs mt-1">
+              Configure your GitHub App to send webhooks to /webhook/github
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {repos.map(({ repo, jobs: rjobs }) => {
+              const latest = rjobs[0]
+              const bestScore = Math.max(...rjobs.map(j => j.score ?? 0))
+              return (
+                <div key={repo} className="flex items-center justify-between bg-gray-800/40 rounded-xl px-4 py-3 ring-1 ring-gray-700/50">
+                  <div className="flex flex-col gap-1">
+                    <span className="font-mono text-sm text-slate-200">{repo}</span>
+                    <span className="font-mono text-xs text-slate-600">
+                      {rjobs.length} job{rjobs.length !== 1 ? 's' : ''} · best score {bestScore.toFixed(3)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <JobBadge status={latest?.status} />
+                    {latest?.pr_url && (
+                      <a
+                        href={latest.pr_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs font-mono text-green-400 hover:text-green-300 underline"
+                      >
+                        PR
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </motion.div>
+
+      {/* Recent jobs */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="bg-gray-900/60 border border-gray-800 rounded-2xl p-5 backdrop-blur-sm"
+      >
+        <h2 className="text-sm font-mono font-semibold text-slate-300 tracking-widest uppercase mb-4">
+          📋 Recent Jobs
+        </h2>
+        {jobs.length === 0 ? (
+          <p className="text-slate-600 font-mono text-xs text-center py-4">No jobs yet</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {jobs.slice(0, 20).map((job) => (
+              <div key={job.run_id} className="flex items-center justify-between font-mono text-xs text-slate-400 bg-gray-800/30 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="text-slate-600 shrink-0">{job.run_id}</span>
+                  <span className="text-slate-300 truncate">{job.repo}</span>
+                  <span className="text-slate-600 shrink-0">{job.branch}</span>
+                  {job.pr_number && <span className="text-slate-600 shrink-0">PR #{job.pr_number}</span>}
+                </div>
+                <div className="flex items-center gap-3 shrink-0 ml-4">
+                  {job.score !== null && job.score !== undefined && (
+                    <span className={`font-bold ${job.score >= 0.9 ? 'text-green-400' : job.score >= 0.5 ? 'text-yellow-400' : 'text-slate-500'}`}>
+                      {job.score.toFixed(3)}
+                    </span>
+                  )}
+                  <JobBadge status={job.status} />
+                  {job.pr_url && (
+                    <a href={job.pr_url} target="_blank" rel="noreferrer" className="text-green-400 hover:text-green-300 underline">
+                      PR
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </motion.div>
+
+      {/* Setup instructions */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.2 }}
+        className="bg-gray-900/60 border border-gray-800 rounded-2xl p-5 backdrop-blur-sm"
+      >
+        <h2 className="text-sm font-mono font-semibold text-slate-300 tracking-widest uppercase mb-4">
+          ⚙ GitHub App Setup
+        </h2>
+        <ol className="text-xs font-mono text-slate-500 space-y-2 list-decimal list-inside">
+          <li>Go to <span className="text-slate-400">github.com/settings/apps/new</span></li>
+          <li>Set webhook URL to <span className="text-green-500/80">https://your-server.com/webhook/github</span></li>
+          <li>Generate webhook secret → add to <span className="text-slate-400">.env</span> as <span className="text-green-500/80">WEBHOOK_SECRET</span></li>
+          <li>Set permissions: <span className="text-slate-400">Contents: Read & Write, Pull requests: Read & Write</span></li>
+          <li>Subscribe to events: <span className="text-slate-400">Push, Pull request</span></li>
+          <li>Install the app on any repo</li>
+        </ol>
+      </motion.div>
+    </div>
+  )
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
+  const [tab,       setTab]       = useState('run')
   const [episodes,  setEpisodes]  = useState(5)
   const [runId,     setRunId]     = useState(null)
   const [status,    setStatus]    = useState({ status: 'idle', episode: 0, scores: [] })
@@ -502,14 +665,36 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Tab switcher */}
+            <div className="flex bg-gray-900 rounded-xl p-1 ring-1 ring-gray-800">
+              {[['run', '▶ Manual Run'], ['repos', '🔗 Live Repos']].map(([id, label]) => (
+                <button
+                  key={id}
+                  onClick={() => setTab(id)}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all duration-200 ${
+                    tab === id
+                      ? 'bg-green-500/20 text-green-400 ring-1 ring-green-500/40'
+                      : 'text-slate-500 hover:text-slate-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <StatusBadge status={uiStatus} />
-            {runId && (
+            {runId && tab === 'run' && (
               <span className="text-xs font-mono text-slate-600 bg-gray-900 px-2 py-1 rounded-lg ring-1 ring-gray-800">
                 {runId}
               </span>
             )}
           </div>
         </motion.header>
+
+        {/* ── Live Repos tab ────────────────────────────────────────────────── */}
+        {tab === 'repos' && <LiveReposTab />}
+
+        {/* ── Manual Run tab ────────────────────────────────────────────────── */}
+        {tab === 'run' && <>
 
         {/* ── Controls ─────────────────────────────────────────────────────── */}
         <motion.div
@@ -639,6 +824,8 @@ export default function App() {
           </motion.div>
         )}
 
+        </> /* end tab === 'run' */}
+
         {/* ── Footer ───────────────────────────────────────────────────────── */}
         <motion.footer
           initial={{ opacity: 0 }}
@@ -646,7 +833,7 @@ export default function App() {
           transition={{ delay: 0.6 }}
           className="text-center text-xs font-mono text-slate-700 pb-2"
         >
-          AutoPatch v1.0 · LangGraph · Groq llama-3.3-70b · CodeReview-Env
+          AutoPatch v2.0 · LangGraph · Groq llama-3.3-70b · GitHub App
           <span className="text-slate-800"> · by Thowfiq</span>
         </motion.footer>
 

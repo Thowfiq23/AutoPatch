@@ -22,6 +22,7 @@ ENV_URL is read at call-time so run.py can set os.environ before import.
 
 import logging
 import os
+import subprocess
 from typing import List, Optional, TypedDict
 
 import httpx
@@ -62,13 +63,81 @@ class EpisodeState(TypedDict):
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _step(action: dict) -> tuple:
-    """POST /step → (observation_dict, reward, done)."""
+def _step(action: dict, workspace_dir: str = "") -> tuple:
+    """POST /step → (observation_dict, reward, done).
+
+    When workspace_dir is set, handles the action locally against the real
+    filesystem instead of calling CodeReview-Env.
+    """
+    if workspace_dir:
+        return _step_workspace(action, workspace_dir)
     with httpx.Client(timeout=30.0) as client:
         resp = client.post(f"{_env_url()}/step", json=action)
         resp.raise_for_status()
     data = resp.json()
     return data["observation"], data["reward"], data["done"]
+
+
+def _step_workspace(action: dict, workspace_dir: str) -> tuple:
+    """Handle a step action against a real cloned workspace."""
+    action_type = action.get("action_type", "")
+
+    if action_type == "read_file":
+        path = action.get("path", "")
+        full_path = os.path.join(workspace_dir, path)
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except FileNotFoundError:
+            content = f"# File not found: {path}"
+        return {"action_result": content, "task_id": "real_repo"}, 0.0, False
+
+    if action_type == "patch_file":
+        target = action.get("target_file", "")
+        new_content = action.get("new_content", "")
+        full_path = os.path.join(workspace_dir, target)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        # Run pytest to measure reward
+        reward, done, pytest_out = _pytest_reward(workspace_dir)
+        return {"action_result": pytest_out, "task_id": "real_repo"}, reward, done
+
+    if action_type in ("submit_review", "run_tests"):
+        reward, done, pytest_out = _pytest_reward(workspace_dir)
+        return {"action_result": pytest_out, "task_id": "real_repo"}, reward, True
+
+    return {"action_result": "", "task_id": "real_repo"}, 0.0, False
+
+
+def _pytest_reward(workspace_dir: str) -> tuple:
+    """Run pytest in workspace and return (reward, done, output)."""
+    timeout = int(os.getenv("PYTEST_TIMEOUT", "60"))
+    try:
+        result = subprocess.run(
+            ["pytest", "--tb=short", "-q"],
+            capture_output=True, text=True,
+            timeout=timeout, cwd=workspace_dir,
+        )
+        output = result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        return 0.0, True, "pytest timed out"
+    except Exception as exc:
+        return 0.0, True, str(exc)
+
+    # Parse pass/fail counts from pytest summary line
+    # e.g. "5 passed" or "3 failed, 2 passed" or "4 passed, 1 warning"
+    import re
+    passed = sum(int(m) for m in re.findall(r"(\d+) passed", output))
+    failed = sum(int(m) for m in re.findall(r"(\d+) failed", output))
+    total = passed + failed
+
+    if total == 0:
+        return 0.0, True, output
+
+    ratio = passed / total
+    reward = 1.0 if failed == 0 else ratio * 0.9
+    return round(reward, 4), failed == 0, output
 
 
 def _reset(task_id: Optional[str] = None) -> dict:
@@ -92,32 +161,40 @@ def _log(run_id: str, line: str) -> None:
 
 def node_reset(state: EpisodeState) -> dict:
     """
-    POST /reset → POST /step run_tests to capture initial pytest output.
-    Then search for common bug patterns to enrich the observation context.
+    Reset the environment and get initial pytest output.
+
+    Real-repo mode: when github_context.workspace_dir is set, skip CodeReview-Env
+    entirely and use the pre-cloned workspace directly.
     """
     run_id = state["run_id"]
     ep = state["episode"]
     _log(run_id, f"[RESET] episode={ep} run_id={run_id}")
 
-    _reset()
-    obs, _, _ = _step({"action_type": "run_tests"})
-    _log(run_id, f"[RESET] initial pytest done task_id={obs.get('task_id')}")
+    workspace_dir = state.get("github_context", {}).get("workspace_dir", "")
 
-    # file_cache is populated lazily in node_read_file — pre-caching here was burning
-    # steps before patching, causing done=True on the first patch for task_10 (MAX_STEPS=10).
-    file_cache: dict = {}
+    if workspace_dir:
+        # Real-repo mode: pytest already ran in repo_runner; re-run for fresh output
+        _log(run_id, f"[RESET] Real-repo mode workspace={workspace_dir}")
+        obs, _, _ = _step({"action_type": "run_tests"}, workspace_dir=workspace_dir)
+        gh_ctx = state.get("github_context", {})
+        obs = {**obs, "context": gh_ctx.get("context", ""), "task_id": "real_repo",
+               "available_files": _collect_workspace_files(workspace_dir)}
+    else:
+        _reset()
+        obs, _, _ = _step({"action_type": "run_tests"})
+        _log(run_id, f"[RESET] initial pytest done task_id={obs.get('task_id')}")
 
-    # Enrich context for migration/oom tasks: call inspect_logs when the context says so
-    context_text = obs.get("context", "")
-    if any(kw in context_text.lower() for kw in ("inspect_logs", "migration", "oom_killed")):
-        try:
-            log_obs, _, _ = _step({"action_type": "inspect_logs"})
-            log_result = log_obs.get("action_result", "")
-            if log_result and "no log files" not in log_result.lower() and len(log_result.strip()) > 20:
-                obs = {**obs, "context": context_text + f"\n\nService logs:\n{log_result[:400]}"}
-                _log(run_id, "[RESET] Enriched context with service logs")
-        except Exception:
-            pass
+        # Enrich context for migration/oom tasks
+        context_text = obs.get("context", "")
+        if any(kw in context_text.lower() for kw in ("inspect_logs", "migration", "oom_killed")):
+            try:
+                log_obs, _, _ = _step({"action_type": "inspect_logs"})
+                log_result = log_obs.get("action_result", "")
+                if log_result and "no log files" not in log_result.lower() and len(log_result.strip()) > 20:
+                    obs = {**obs, "context": context_text + f"\n\nService logs:\n{log_result[:400]}"}
+                    _log(run_id, "[RESET] Enriched context with service logs")
+            except Exception:
+                pass
 
     return {
         "observation": obs,
@@ -129,8 +206,26 @@ def node_reset(state: EpisodeState) -> dict:
         "done": False,
         "retry_count": 0,
         "applied_patches": [],
-        "file_cache": file_cache,
+        "file_cache": {},
     }
+
+
+def _collect_workspace_files(workspace_dir: str) -> list:
+    """Collect non-test .py files from a workspace directory."""
+    _skip = {"__pycache__", ".venv", "venv", ".git", "node_modules"}
+    files = []
+    for root, dirs, filenames in os.walk(workspace_dir):
+        dirs[:] = [d for d in dirs if d not in _skip]
+        for f in filenames:
+            if not f.endswith(".py"):
+                continue
+            if any(p in f for p in ("test_", "_test", "conftest")):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), workspace_dir).replace("\\", "/")
+            if "/tests/" in f"/{rel}" or rel.startswith("tests/"):
+                continue
+            files.append(rel)
+    return files
 
 
 def node_plan(state: EpisodeState) -> dict:
@@ -183,11 +278,12 @@ def node_read_file(state: EpisodeState) -> dict:
             "current_patch": {},
         }
 
-    obs, _, _ = _step({"action_type": "read_file", "path": file_path})
+    workspace_dir = state.get("github_context", {}).get("workspace_dir", "")
+    obs, _, _ = _step({"action_type": "read_file", "path": file_path}, workspace_dir=workspace_dir)
     return {
         "original_file": obs.get("action_result", ""),
         "observation": obs,
-        "retry_count": 0,   # reset per new task
+        "retry_count": 0,
         "current_patch": {},
     }
 
@@ -305,12 +401,13 @@ def node_patch(state: EpisodeState) -> dict:
     target = patch.get("target_file", "")
     _log(run_id, f"[STEP] patch_file target={target}")
 
+    workspace_dir = state.get("github_context", {}).get("workspace_dir", "")
     action = {
         "action_type": "patch_file",
         "target_file": target,
         "new_content": patch.get("new_content", ""),
     }
-    obs, reward, done = _step(action)
+    obs, reward, done = _step(action, workspace_dir=workspace_dir)
     rewards = state["rewards"] + [reward]
     _log(run_id, f"[STEP] patch_file reward={reward:.3f} done={done}")
 
@@ -376,9 +473,11 @@ def node_submit(state: EpisodeState) -> dict:
 
     _log(run_id, f"[END] submitting n_patched={n_patched} score={score:.3f}")
 
-    # Call restart_service once before submitting if the task explicitly requires it
+    workspace_dir = state.get("github_context", {}).get("workspace_dir", "")
+
+    # Call restart_service once before submitting if the task explicitly requires it (CodeReview-Env only)
     context_text = state.get("observation", {}).get("context", "")
-    if "restart_service" in context_text and n_patched > 0:
+    if not workspace_dir and "restart_service" in context_text and n_patched > 0:
         try:
             restart_obs, restart_reward, restart_done = _step({"action_type": "restart_service"})
             if restart_reward > 0:
@@ -392,7 +491,7 @@ def node_submit(state: EpisodeState) -> dict:
         "action_type": "submit_review",
         "summary": summary,
         "root_cause": root_cause,
-    })
+    }, workspace_dir=workspace_dir)
     final_rewards = rewards + [reward]
     final_score = max(final_rewards)
     _log(run_id, f"[END] terminal_reward={reward:.3f} final_score={final_score:.3f}")

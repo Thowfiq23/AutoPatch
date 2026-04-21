@@ -27,10 +27,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from autopatch.agents import memory
 from autopatch import orchestrator
+from autopatch.github.webhook import router as webhook_router
+from autopatch.github.job_handler import get_recent_jobs
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AutoPatch API", version="1.0.0")
+app = FastAPI(title="AutoPatch API", version="2.0.0")
+
+app.include_router(webhook_router)
 
 # Allow all origins so the React dashboard on localhost:5173 can call us
 app.add_middleware(
@@ -190,6 +194,34 @@ async def stream_logs(run_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /jobs  — list recent webhook jobs
+# ---------------------------------------------------------------------------
+
+@app.get("/jobs")
+async def list_jobs():
+    """Return recent webhook-triggered fix jobs (newest first)."""
+    try:
+        jobs = list(reversed(get_recent_jobs()))
+        return {"jobs": jobs}
+    except Exception as exc:
+        logger.error("/jobs error: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@app.get("/jobs/{run_id}")
+async def job_status(run_id: str):
+    """Return logs and status for a specific webhook job."""
+    try:
+        logs = memory.get_logs(run_id)
+        jobs = get_recent_jobs()
+        job = next((j for j in jobs if j["run_id"] == run_id), None)
+        return {"run_id": run_id, "job": job, "logs": logs}
+    except Exception as exc:
+        logger.error("/jobs/%s error: %s", run_id, exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
 # ---------------------------------------------------------------------------
